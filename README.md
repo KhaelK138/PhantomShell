@@ -2,7 +2,6 @@
   <img src="assets/phantom.png" alt="Phantom" width="120" height="120" />
 </p>
 
-<h1 align="center">PhantomShell</h1>
 <p align="center">As if firewalls didn't exist.</p>
 
 
