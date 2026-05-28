@@ -7,7 +7,7 @@
 
 # PhantomShell
 
-Executes commands via raw TCP/UDP ethernet frames, bypassing local firewalls like `iptables` and central firewalling by piggybacking on legitimate service traffic. Listens on every port, all in one C binary.
+Executes commands via raw TCP/UDP ethernet frames, bypassing local firewalls like `iptables` and central firewalling by piggybacking on legitimate service traffic. Listens on every port, all in one C file.
 
 ## Build
 
