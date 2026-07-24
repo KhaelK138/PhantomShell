@@ -127,7 +127,7 @@ def udp_run(target, port, cmd, prefix, timeout=3):
         sock.close()
         return None
     token = gen_token()
-    payload = f"runcap:{token}:{cmd}"
+    payload = f"runcap:{token}:{cmd}:{token}"
     return udp_send_recv(target, port, payload, timeout, token)
 
 
@@ -144,7 +144,7 @@ def udp_interactive(target, port, prefix, timeout=3):
             break
         token = gen_token()
         if prefix == "runcap:":
-            sock.sendto(f"runcap:{token}:{cmd}".encode(), (target, port))
+            sock.sendto(f"runcap:{token}:{cmd}:{token}".encode(), (target, port))
         else:
             sock.sendto(f"run:{cmd}".encode(), (target, port))
         if prefix != "run:":
@@ -411,7 +411,7 @@ def tcp_run(target, port, cmd, prefix, timeout=3):
             print(f"[-] {result[1]}", file=sys.stderr)
         return None
     token = gen_token()
-    payload = f"runcap:{token}:{cmd}"
+    payload = f"runcap:{token}:{cmd}:{token}"
     result = tcp_connect_send(target, port, payload, timeout, token)
     if isinstance(result, tuple) and result[0] == "__CONN_ERR__":
         print(f"[-] {result[1]}", file=sys.stderr)
@@ -430,7 +430,7 @@ def tcp_interactive(target, port, prefix, timeout=3):
             break
         if prefix == "runcap:":
             token = gen_token()
-            output = tcp_connect_send(target, port, f"runcap:{token}:{cmd}", timeout, token)
+            output = tcp_connect_send(target, port, f"runcap:{token}:{cmd}:{token}", timeout, token)
         else:
             output = tcp_connect_send(target, port, f"run:{cmd}", timeout)
         if output:

