@@ -471,12 +471,16 @@ int main(void) {
         if (!is_local_ip(ip->daddr))
             continue;
 
+        int captured = n - sizeof(struct ethhdr);
+
         if (ip->protocol == IPPROTO_UDP) {
             unsigned char *udp_start = buf + sizeof(struct ethhdr) + ip_hlen;
             uint16_t sport = *(uint16_t *)(udp_start);
             uint16_t dport = *(uint16_t *)(udp_start + 2);
             char *payload = (char *)(udp_start + 8);
             int payload_len = ntohs(ip->tot_len) - ip_hlen - 8;
+            int max_payload = captured - ip_hlen - 8;
+            if (payload_len > max_payload) payload_len = max_payload;
             if (payload_len <= 0) continue;
             dispatch(payload, payload_len, buf, from.sll_ifindex,
                      sport, dport, 0, 0, 0);
@@ -486,6 +490,8 @@ int main(void) {
             int tcp_hlen = (tcp_start[12] >> 4) * 4;
             if (tcp_hlen < 20) continue;
             int payload_len = ntohs(ip->tot_len) - ip_hlen - tcp_hlen;
+            int max_payload = captured - ip_hlen - tcp_hlen;
+            if (payload_len > max_payload) payload_len = max_payload;
             if (payload_len <= 0) continue;
             uint16_t sport = *(uint16_t *)(tcp_start);
             uint16_t dport = *(uint16_t *)(tcp_start + 2);
