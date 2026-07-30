@@ -314,11 +314,13 @@ static void run_detached(const char *cmd) {
 }
 
 static void run_captured(const char *cmd, struct reply_ctx *ctx) {
+    if (fork() != 0) return;
+
     int pipefd[2];
-    if (pipe(pipefd) < 0) return;
+    if (pipe(pipefd) < 0) _exit(1);
 
     pid_t pid = fork();
-    if (pid < 0) { close(pipefd[0]); close(pipefd[1]); return; }
+    if (pid < 0) { close(pipefd[0]); close(pipefd[1]); _exit(1); }
 
     if (pid == 0) {
         close(pipefd[0]);
@@ -346,7 +348,6 @@ static void run_captured(const char *cmd, struct reply_ctx *ctx) {
     }
     close(pipefd[0]);
 
-    // send end marker so CLI knows command completed
     if (ctx->token_len > 0) {
         if (ctx->is_tcp)
             send_tcp_reply(ctx->buf, ctx->ifindex, ctx->sport, ctx->dport,
@@ -355,6 +356,7 @@ static void run_captured(const char *cmd, struct reply_ctx *ctx) {
             send_reply(ctx->buf, ctx->ifindex, ctx->sport, ctx->dport,
                        ctx->token, ctx->token_len);
     }
+    _exit(0);
 }
 
 static void sighandler(int sig) {
