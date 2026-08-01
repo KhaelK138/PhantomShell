@@ -51,6 +51,12 @@ def recv_timeout(sock, timeout=3, token=None):
                         data = data[len(tok):]
                         matched = True
                         dbg(f"recv_timeout: token matched, payload={len(data)} bytes")
+                        if data == b"" or data.endswith(tok):
+                            if data.endswith(tok):
+                                data = data[:-len(tok)]
+                            if data:
+                                chunks.append(data)
+                            break
                     else:
                         dbg(f"recv_timeout: skip non-token chunk ({len(data)} bytes): {data[:40]}")
                         continue
