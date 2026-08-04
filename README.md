@@ -7,7 +7,7 @@
 
 # PhantomShell
 
-Executes commands via raw TCP/UDP ethernet frames, bypassing local firewalls like `iptables` and central firewalling by piggybacking on legitimate service traffic. Listens on every port, all in one C file.
+Executes commands via raw TCP/UDP ethernet frames, bypassing external (and local) firewalling by piggybacking on legitimate service traffic. Listens on every port, all in one C file.
 
 ## Build
 
@@ -29,7 +29,10 @@ Wire format (CLI constructs these automatically):
 
 ## CLI
 
-`phantomshell-cli.py` requires scapy and root. Root is needed for scapy's L2 sniff and to insert iptables INPUT DROP rules that prevent the kernel from sending RSTs to the implant's raw replies. Rules are cleaned up on exit.
+> [!CAUTION]
+> If running the CLI from a VM, use **bridged** networking. VMware and VirtualBox NAT use userspace TCP proxies that mangle raw packets with unexpected sequence numbers, breaking TCP mode.
+
+`phantomshell-cli.py` requires scapy and root (needed for scapy's L2 sniff).
 
 TCP (connects to a real open port, sniffs the raw reply):
 ```
