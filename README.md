@@ -15,7 +15,7 @@ Executes commands via raw TCP/UDP ethernet frames, bypassing external (and local
 gcc -O2 -o phantomshell phantomshell.c
 ```
 
-Then just simply run the binary. Optionally background it with `./phantomshell &`. Listens on all interfaces, all UDP+TCP ports, and only processes packets destined for its local IP.
+Then just simply run the binary on the target to start listening. Optionally background it with `./phantomshell &`. Listens on all interfaces, all UDP+TCP ports, and only processes packets destined for its local IP.
 
 ## CLI
 
