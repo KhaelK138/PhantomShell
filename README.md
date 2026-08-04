@@ -19,14 +19,6 @@ gcc -O2 -s -o phantomshell phantomshell.c
 
 `./phantomshell` - Listens on all interfaces, all UDP+TCP ports. Only processes packets destined for its local IP.
 
-All payloads are framed with an 8-character hex token so they can be embedded anywhere in protocol traffic (e.g. HTTP body, URL parameter, after SSH banner). The implant finds the last occurrence of the keyword in the packet, then uses `:<token>` to delimit the end.
-
-Wire format (CLI constructs these automatically):
-- `runcap:<token>:<cmd>:<token>` - capture stdout/stderr, send back in token-prefixed 1400-byte chunks, bare token marks end
-- `run:<token>:<cmd>:<token>` - fire and forget, no output
-- `write:<token>:<w|a>:<path>:<b64data>:<token>` - write or append file contents
-- `status:<token>:<token>` - replies `<token>up`
-
 ## CLI
 
 > [!CAUTION]
@@ -47,6 +39,16 @@ python3 phantomshell-cli.py -t <ip> -c <cmd>
 python3 phantomshell-cli.py -t <ip> -c <cmd> --nocap
 python3 phantomshell-cli.py -t <ip> -i
 ```
+
+## C2 Specifics
+
+All payloads are framed with an 8-character hex token so they can be embedded anywhere in protocol traffic (e.g. HTTP body, URL parameter, after SSH banner). The implant finds the last occurrence of the keyword in the packet, then uses `:<token>` to delimit the end.
+
+Wire format (CLI constructs these automatically):
+- `runcap:<token>:<cmd>:<token>` - capture stdout/stderr, send back in token-prefixed 1400-byte chunks, bare token marks end
+- `run:<token>:<cmd>:<token>` - fire and forget, no output
+- `write:<token>:<w|a>:<path>:<b64data>:<token>` - write or append file contents
+- `status:<token>:<token>` - replies `<token>up`
 
 ## Disclaimer
 
