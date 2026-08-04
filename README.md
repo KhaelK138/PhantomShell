@@ -9,15 +9,13 @@
 
 Executes commands via raw TCP/UDP ethernet frames, bypassing external (and local) firewalling by piggybacking on legitimate service traffic. Listens on every port, all in one C file.
 
-## Build
+## Build & Usage
 
 ```
-gcc -O2 -s -o phantomshell phantomshell.c
+gcc -O2 -o phantomshell phantomshell.c
 ```
 
-## Usage
-
-`./phantomshell` - Listens on all interfaces, all UDP+TCP ports. Only processes packets destined for its local IP.
+Then just simply run the binary. Optionally background it with `./phantomshell &`. Listens on all interfaces, all UDP+TCP ports, and only processes packets destined for its local IP.
 
 ## CLI
 
