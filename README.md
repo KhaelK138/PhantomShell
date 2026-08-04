@@ -44,3 +44,7 @@ python3 phantomshell-cli.py -t <ip> -c <cmd>
 python3 phantomshell-cli.py -t <ip> -c <cmd> --nocap
 python3 phantomshell-cli.py -t <ip> -i
 ```
+
+## Disclaimer
+
+This tool is intended for authorized and educational purposes only. Do not use it against systems you do not have explicit permission to test. 
