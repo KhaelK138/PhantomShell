@@ -7,7 +7,7 @@
 
 # PhantomShell
 
-Executes commands via raw TCP/UDP ethernet frames, bypassing external (and local) firewalling by piggybacking on legitimate service traffic. Listens on every port, all in one C file.
+A basic C2 using the TCP Doublespeak technique explored at DEFCON 34's Packet Hacking Village. Executes commands via raw TCP/UDP ethernet frames, bypassing external (and local) firewalling by piggybacking on legitimate service traffic. Listens on every port, all in one C file.
 
 ## Payload Build & Usage
 
